@@ -57,25 +57,35 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  # autoPatchelfHook runs inside fixupPhase, before this hook, so the
-  # interpreter and RPATH are already rewritten and the binary is executable
-  # here. Forcing libstdc++ to load at process start (DT_NEEDED) is what
-  # upstream's own Nix build does: addons the main process dlopen's then resolve
-  # libstdc++.so.6 / libgcc_s.so.1 from the already-loaded set regardless of the
-  # addon's own DT_RUNPATH. patchelf must run before wrapProgram, which replaces
-  # $out/bin/omp with a wrapper and moves the real binary to .omp-wrapped.
+  # autoPatchelfHook's own pass runs *after* postFixup, so it is invoked
+  # explicitly here: the interpreter has to be rewritten before the binary can
+  # be executed to emit completions, and the libstdc++ DT_NEEDED entry has to be
+  # added before autoPatchelf resolves it. Forcing libstdc++ to load at process
+  # start is what upstream's own Nix build does: addons the main process
+  # dlopen's then resolve libstdc++.so.6 / libgcc_s.so.1 from the already-loaded
+  # set regardless of the addon's own DT_RUNPATH. patchelf must run before
+  # wrapProgram, which replaces $out/bin/omp with a wrapper and moves the real
+  # binary to .omp-wrapped.
+  dontAutoPatchelf = true;
+
   postFixup =
     lib.optionalString stdenv.hostPlatform.isLinux ''
       patchelf --add-needed libstdc++.so.6 "$out/bin/omp"
+      autoPatchelf -- "$out/bin/omp"
       wrapProgram "$out/bin/omp" \
         --set-default OMP_NATIVE_LIBRARY_PATH "${lib.makeLibraryPath runtimeLibraries}"
     ''
+    # Written to files rather than piped through process substitution: a
+    # non-zero exit inside <(...) would silently install empty completions.
     + ''
       export HOME="$TMPDIR"
+      for shell in bash zsh fish; do
+        $out/bin/omp completions "$shell" > "$TMPDIR/omp.$shell"
+      done
       installShellCompletion --cmd omp \
-        --bash <($out/bin/omp completions bash) \
-        --zsh <($out/bin/omp completions zsh) \
-        --fish <($out/bin/omp completions fish)
+        --bash "$TMPDIR/omp.bash" \
+        --zsh "$TMPDIR/omp.zsh" \
+        --fish "$TMPDIR/omp.fish"
     '';
 
   doInstallCheck = true;
