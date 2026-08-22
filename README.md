@@ -18,10 +18,13 @@ compile) and nobody publishes the result to a binary cache, so every version bum
 costs a full local build. This flake wraps the official release artifact instead,
 which is the same binary the npm and mise installers ship.
 
-On Linux the glibc artifact is used and `autoPatchelfHook` rewrites the
-interpreter; `libstdc++.so.6` is force-loaded and `OMP_NATIVE_LIBRARY_PATH` is
-set so the addons omp extracts at runtime resolve their dependencies, mirroring
-what upstream's own Nix build does.
+On Linux the glibc artifact is used and only its ELF interpreter is rewritten.
+Nothing else may be touched: growing the dynamic section of a Bun single-file
+executable (`--add-needed`, `--set-rpath`, hence also `autoPatchelfHook`) shifts
+the payload appended to the binary and makes the aarch64 build SIGSEGV before
+main. The binary needs nothing beyond glibc, and the wrapper sets
+`OMP_NATIVE_LIBRARY_PATH` so the addons omp extracts at runtime still resolve
+their dependencies in the inference workers.
 
 ## Usage
 

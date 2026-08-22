@@ -26,8 +26,7 @@ let
 
   # The aarch64 release binary is linked with 64 KiB segment alignment (every
   # PT_LOAD carries p_align 0x10000); the x86_64 one uses 4 KiB. patchelf
-  # assumes 4 KiB unless told otherwise and then relocates the headers to an
-  # address the kernel cannot map, which makes the binary SIGSEGV on exec.
+  # assumes 4 KiB unless told otherwise.
   elfPageSize = if stdenv.hostPlatform.isAarch64 then "65536" else "4096";
 in
 stdenv.mkDerivation {
@@ -61,20 +60,22 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  # Forcing libstdc++ to load at process start is what upstream's own Nix build
-  # does: addons the main process dlopen's then resolve libstdc++.so.6 /
-  # libgcc_s.so.1 from the already-loaded set regardless of the addon's own
-  # DT_RUNPATH. glibc itself, libm and libgcc_s come from the interpreter's
-  # built-in search path. patchelf has to run before wrapProgram, which replaces
-  # $out/bin/omp with a wrapper and moves the real binary to .omp-wrapped, and
-  # before the binary is executed for its completions.
+  # Only the interpreter may be rewritten. Growing the dynamic section of this
+  # Bun single-file executable — `--add-needed`, `--set-rpath`, and therefore
+  # autoPatchelfHook — shifts the appended payload and makes the aarch64 binary
+  # SIGSEGV before main (verified against the release artifact in an arm64
+  # container: interpreter-only survives, `--add-needed libstdc++.so.6` and
+  # `--set-rpath` both crash). That rules out the DT_NEEDED libstdc++ preload
+  # upstream's own Nix build applies, so addons are served through
+  # OMP_NATIVE_LIBRARY_PATH alone, which the agent injects into its inference
+  # worker subprocesses' LD_LIBRARY_PATH. The binary itself needs nothing beyond
+  # glibc: DT_NEEDED is libc, ld-linux, libpthread, libdl and libm, all resolved
+  # from the interpreter's built-in search path.
   postFixup =
     lib.optionalString stdenv.hostPlatform.isLinux ''
       patchelf \
         --page-size ${elfPageSize} \
         --set-interpreter "$(cat "$NIX_CC/nix-support/dynamic-linker")" \
-        --add-needed libstdc++.so.6 \
-        --set-rpath "${lib.makeLibraryPath [ stdenv.cc.cc.lib ]}" \
         "$out/bin/omp"
       wrapProgram "$out/bin/omp" \
         --set-default OMP_NATIVE_LIBRARY_PATH "${lib.makeLibraryPath runtimeLibraries}"
