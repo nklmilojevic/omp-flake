@@ -3,7 +3,6 @@
   stdenv,
   fetchurl,
   installShellFiles,
-  autoPatchelfHook,
   makeBinaryWrapper,
   alsa-lib,
   libopus,
@@ -24,6 +23,12 @@ let
     libopus
     libpulseaudio
   ];
+
+  # The aarch64 release binary is linked with 64 KiB segment alignment (every
+  # PT_LOAD carries p_align 0x10000); the x86_64 one uses 4 KiB. patchelf
+  # assumes 4 KiB unless told otherwise and then relocates the headers to an
+  # address the kernel cannot map, which makes the binary SIGSEGV on exec.
+  elfPageSize = if stdenv.hostPlatform.isAarch64 then "65536" else "4096";
 in
 stdenv.mkDerivation {
   pname = "omp";
@@ -37,19 +42,18 @@ stdenv.mkDerivation {
   nativeBuildInputs = [
     installShellFiles
   ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [
-    autoPatchelfHook
-    makeBinaryWrapper
-  ];
-
-  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
+  ++ lib.optionals stdenv.hostPlatform.isLinux [ makeBinaryWrapper ];
 
   dontUnpack = true;
 
   # The release artifact is a Bun single-file executable: the JS bundle and a
   # compressed native addon live inside the ELF/Mach-O image. Stripping rewrites
-  # the file and breaks the loader, and on macOS it also voids the signature.
+  # the file and breaks both, and on macOS it also voids the signature.
   dontStrip = true;
+
+  # All ELF rewriting happens in postFixup with an explicit page size; the
+  # default --shrink-rpath pass has no such flag.
+  dontPatchELF = true;
 
   installPhase = ''
     runHook preInstall
@@ -57,21 +61,21 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  # autoPatchelfHook's own pass runs *after* postFixup, so it is invoked
-  # explicitly here: the interpreter has to be rewritten before the binary can
-  # be executed to emit completions, and the libstdc++ DT_NEEDED entry has to be
-  # added before autoPatchelf resolves it. Forcing libstdc++ to load at process
-  # start is what upstream's own Nix build does: addons the main process
-  # dlopen's then resolve libstdc++.so.6 / libgcc_s.so.1 from the already-loaded
-  # set regardless of the addon's own DT_RUNPATH. patchelf must run before
-  # wrapProgram, which replaces $out/bin/omp with a wrapper and moves the real
-  # binary to .omp-wrapped.
-  dontAutoPatchelf = true;
-
+  # Forcing libstdc++ to load at process start is what upstream's own Nix build
+  # does: addons the main process dlopen's then resolve libstdc++.so.6 /
+  # libgcc_s.so.1 from the already-loaded set regardless of the addon's own
+  # DT_RUNPATH. glibc itself, libm and libgcc_s come from the interpreter's
+  # built-in search path. patchelf has to run before wrapProgram, which replaces
+  # $out/bin/omp with a wrapper and moves the real binary to .omp-wrapped, and
+  # before the binary is executed for its completions.
   postFixup =
     lib.optionalString stdenv.hostPlatform.isLinux ''
-      patchelf --add-needed libstdc++.so.6 "$out/bin/omp"
-      autoPatchelf -- "$out/bin/omp"
+      patchelf \
+        --page-size ${elfPageSize} \
+        --set-interpreter "$(cat "$NIX_CC/nix-support/dynamic-linker")" \
+        --add-needed libstdc++.so.6 \
+        --set-rpath "${lib.makeLibraryPath [ stdenv.cc.cc.lib ]}" \
+        "$out/bin/omp"
       wrapProgram "$out/bin/omp" \
         --set-default OMP_NATIVE_LIBRARY_PATH "${lib.makeLibraryPath runtimeLibraries}"
     ''
@@ -92,6 +96,7 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
     HOME="$TMPDIR" $out/bin/omp --version | grep -q "${sources.version}"
+    HOME="$TMPDIR" $out/bin/omp --smoke-test | grep -q "smoke-test: ok"
     runHook postInstallCheck
   '';
 
