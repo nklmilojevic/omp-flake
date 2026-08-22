@@ -20,7 +20,7 @@ in
 
     enableBinSymlink = lib.mkOption {
       type = lib.types.bool;
-      default = pkgs.stdenv.isLinux;
+      default = pkgs.stdenv.hostPlatform.isLinux;
       description = ''
         Whether to create a symlink at ~/.local/bin/omp.
         Enabled by default on Linux to ensure the binary is in a standard location.
